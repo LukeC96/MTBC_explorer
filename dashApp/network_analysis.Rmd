@@ -1,0 +1,585 @@
+---
+title: "network_analysis"
+output: html_document
+date: "2024-07-28"
+---
+
+```{r setup, include=FALSE}
+require("knitr")
+knitr::opts_chunk$set(echo = TRUE)
+
+library(viridis)
+library(tidyverse)
+library(igraph)
+library(tibble)
+
+# Set the root/top-level directory to the project directory so all paths
+# that follow will be relative to that directory
+opts_knit$set(root.dir = "../")
+
+require("here")
+
+
+library(WGCNA)
+
+library(readxl)
+```
+
+Load expression information and gene module information
+
+```{r load files, echo=FALSE}
+#matrix of gene expression in each sample
+analysis <- readRDS(here("R_data/datExpr.RData"))
+
+#dataframe of module assignment, MM for each module for each gene
+geneInfo_df <- readRDS(here("R_data/complete_geneInfo.Rdata"))
+
+
+# set threshold values
+thresholds <- seq(0.1, 0.9, by = 0.1)
+
+# read in which samples contain which conditions
+condition_data <- read_excel("R_data/sample_conditions.xlsx")
+colnames(condition_data) <- c("condition", "number_of_samples", "sample_ids")
+
+# separate samples into separate rows
+sample_condition_mapping <- condition_data %>%
+  separate_rows(sample_ids, sep = ",\\s*") %>% # \\s* handles optional spaces
+  select(sample_id = sample_ids, condition)
+
+aggregated_conditions <- sample_condition_mapping %>%
+  group_by(sample_id) %>%
+  summarize(condition = paste(unique(condition), collapse = ", "))
+
+# add condition name columns to condition count dataframe by sample id
+analysis_df <- analysis  
+analysis_df$sample_id <- rownames(analysis_df)
+
+# generic dataframe with condition names attached
+analysis_df <- analysis_df %>%
+  left_join(aggregated_conditions, by = "sample_id")
+```
+
+
+## 1) Analysing entire networks 
+
+```{r functions for general network properties}
+
+# function for looping through threshold  values on adjacency matrix
+analyse_conditions <- function(adjMat, thresholds) {
+  results <- tibble(threshold = numeric(), mean_distance = numeric(), degrees = numeric())
+  
+  for (threshold in thresholds) {
+    # apply edge weight threshold to adjacency matrix
+    filtered_adjMat <- adjMat * (adjMat >= threshold)
+      
+    network <- graph_from_adjacency_matrix(filtered_adjMat, mode = "undirected", weighted = TRUE)
+      
+    network_properties <- calculate_network_properties(network)
+      
+    results <- add_row(results, threshold = threshold,
+                       mean_distance = network_properties$mean_distance,
+                       degrees = network_properties$degrees)
+  }
+  
+  
+  return(results)
+}
+
+# function for calculating network properties 
+calculate_network_properties <- function(network) {
+  
+  mean_dist <- mean_distance(network, directed = FALSE, unconnected = TRUE)
+  degrees <- mean(degree(network)) 
+  
+  
+  return(list(mean_distance = mean_dist, degrees = degrees))
+}
+```
+
+
+
+```{r code for all condition networks mean distance calculation}
+
+# list to store the results
+all_results_entire_network <- list()
+
+
+# all conditions
+analysis_df_all <- analysis_df %>%
+  select(-sample_id, -condition)  # remove non count columns
+
+adjMat_all <- adjacency(analysis_df_all, 
+                        selectCols = NULL,  
+                        type = "unsigned", 
+                        power = 14,
+                        corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                        weights = NULL)
+
+
+results_all <- analyse_conditions(adjMat_all, thresholds)
+
+all_results_entire_network[["all_conditions"]] <- results_all
+
+mean_distances_all <- results_all$mean_distance 
+
+
+```
+
+```{r code for plot of all condition networks mean distance calculation}
+plot(thresholds, mean_distances_all, type = "b", xlab = "Threshold", ylab = "Mean Distance",
+     main = "Mean Distance vs. Threshold")
+```
+
+```{r code for mean distance against decreasing thresholds and removing one condition each loop (total condtions always total-1}
+all_conditions <- c("ammonium", "histidine", "lysine", "hypoxia", "extended hypoxia",
+                    "reaerated culture", "butyrate", "butyrate and glucose",
+                    "glucose", "high iron", "low iron", "acid", "stationary", "cholesterol", "exponential")
+
+
+# remove one condition at a time
+for (condition_to_remove in all_conditions) {
+  print(condition_to_remove)
+  
+  # filter out condition
+  analysis_df_filtered <- analysis_df %>%
+    filter(!str_detect(condition, condition_to_remove)) %>%
+    select(-sample_id, -condition)
+  
+  adjMat_filtered <- adjacency(analysis_df_filtered, 
+                               selectCols = NULL, 
+                               type = "unsigned", 
+                               power = 14,
+                               corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                               weights = NULL
+  )
+  
+  results_filtered <- analyse_conditions(adjMat_filtered, thresholds)
+  
+  all_results_entire_network[[condition_to_remove]] <- results_filtered
+}
+  
+```
+
+```{r code for plot of mean distance against decreasing thresholds and removing one condition each loop (total condtions always total-1}
+
+condition_colors <- rainbow(length(all_conditions))  # set of colours for each condition
+
+# find range of mean distances for y axis scaling
+all_mean_distances <- unlist(lapply(all_results_entire_network, function(x) x$mean_distance))
+y_range <- range(all_mean_distances)
+
+# plot margins to move legend outside of plot space
+par(mar = c(5, 4, 4, 10), xpd = TRUE)
+
+
+plot(thresholds, all_results_entire_network[["all_conditions"]]$mean_distance, 
+     type = "b", col = "black", pch = 19, lty = 1, lwd = 2,
+     xlab = "Threshold", ylab = "Mean Distance", 
+     main = "Mean Distance vs. Threshold for Different Conditions Removed",
+     ylim = y_range)
+
+# loop through conditions adding to plot
+for (i in seq_along(all_conditions)) {
+  condition_name <- all_conditions[i]
+  mean_distances <- all_results_entire_network[[condition_name]]$mean_distance
+
+  lines(thresholds, mean_distances, type = "b", col = condition_colors[i], 
+        pch = 19, lty = 1, lwd = 2)
+}
+
+# add legend to right hand side of plot
+legend("topright", inset = c(-0.5, 0), legend = c("none", all_conditions), 
+       col = c("black", condition_colors), lty = 1, lwd = 2, pch = 19,
+       title = "Conditions Removed", bty = "n")
+```
+
+```{r code for exporting each condition removed mean distance vs threshold on 4x4 grid of plots}
+
+png("plots_4x4_grid.png", width = 1200, height = 1200)
+
+par(mfrow = c(4, 4))
+
+
+cex_main_size <- 1.5  
+cex_lab_size <- 1.5   
+cex_axis_size <- 1.5  
+
+# all conditions plot first
+plot(thresholds, mean_distances_all, type = "b", col = "black",
+     main = "All Conditions", xlab = "Threshold", ylab = "Mean Distance", 
+     ylim = y_range, cex.main = cex_main_size, cex.lab = cex_lab_size, cex.axis = cex_axis_size )
+
+# all over conditions
+for (i in seq_along(all_conditions)) {
+  condition_name <- all_conditions[i]
+  mean_distances <- all_results_entire_network[[condition_name]]$mean_distance
+
+  plot(thresholds, mean_distances, type = "b", col = "black",
+       main = condition_name, xlab = "Threshold", ylab = "Mean Distance", 
+       ylim = y_range, cex.main = cex_main_size, cex.lab = cex_lab_size, cex.axis = cex_axis_size)
+}
+```
+
+
+```{r testing just exponential to generate network}
+
+condition_to_keep <- "exponential"
+
+analysis_df_exponential <- analysis_df %>%
+    filter(str_detect(condition, condition_to_keep)) %>%  
+    select(-sample_id, -condition)  
+
+
+adjMat_filtered_exponential <- adjacency(analysis_df_exponential, 
+                             selectCols = NULL, 
+                             type = "unsigned", 
+                             power = 14,
+                             corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                             weights = NULL
+)
+
+results_filtered_exponential <- analyse_conditions(adjMat_filtered, thresholds)
+
+all_results_exponential <- results_filtered_exponential
+```
+
+
+```{r set number of decreasing conditions calculate mean distance}
+all_conditions_rev <- rev(c("ammonium", "histidine", "lysine", "hypoxia", "extended hypoxia",
+                    "reaerated culture", "butyrate", "butyrate and glucose",
+                    "glucose", "high iron", "low iron", "acid", "stationary", "cholesterol", "exponential"))
+
+all_results_selected_conditions <- list()
+
+condition_counts <- c(15, 10, 5, 1)
+
+for (num_conditions in condition_counts) {
+  
+  if (num_conditions == 1) {
+    conditions_to_use <- "exponential"
+  } else {
+    conditions_to_use <- all_conditions_rev[1:num_conditions]
+  }
+  
+  print(paste("Using conditions:", paste(conditions_to_use, collapse = ", ")))
+  
+  analysis_df_filtered <- analysis_df %>%
+    filter(str_detect(condition, paste(conditions_to_use, collapse = "|"))) %>% 
+    select(-sample_id, -condition)  
+  
+  adjMat_filtered <- adjacency(analysis_df_filtered, 
+                               selectCols = NULL, 
+                               type = "unsigned", 
+                               power = 14,
+                               corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                               weights = NULL)
+  
+  results_filtered <- analyse_conditions(adjMat_filtered, thresholds)
+  
+  all_results_selected_conditions[[paste(num_conditions, "conditions")]] <- results_filtered
+}
+
+```
+```{r set number of decreasing conditions plot mean distance}
+par(mar = c(5, 5, 4, 8), xpd = TRUE)
+
+plot_colors <- c("black", "red", "blue", "green")
+
+mean_distances <- all_results_selected_conditions[["15 conditions"]]$mean_distance
+
+plot(thresholds, mean_distances, type = "b", col = plot_colors[1], lwd = 2, pch = 19,
+     xlab = "Threshold", ylab = "Mean Distance", ylim = y_range)
+
+# overlay other plots (10, 5, 1 conditions)
+for (i in 2:length(condition_counts)) {
+  num_conditions <- condition_counts[i]
+  condition_label <- paste(num_conditions, "conditions")
+  mean_distances <- all_results_selected_conditions[[condition_label]]$mean_distance
+  
+  lines(thresholds, mean_distances, col = plot_colors[i], lwd = 2)
+  points(thresholds, mean_distances, col = plot_colors[i], pch = 19)
+}
+
+legend("topright", inset = c(-0.35, 0), legend = c("15 Conditions", "10 Conditions", "5 Conditions", "1 Condition"),
+       col = plot_colors, lty = 1, lwd = 2, pch = 19, xpd = TRUE, bty="n")
+```
+
+## 2) More network properties
+
+```{r functions for general network properties}
+
+# function for storing further network properties and looping through thresholds
+analyse_conditions_expanded <- function(adjMat, thresholds) {
+  results <- tibble(
+    threshold = numeric(),
+    mean_distance = numeric(),
+    degrees = numeric(),
+    clustering_coefficient = numeric(),
+    betweenness_centrality = numeric(),
+    graph_density = numeric()
+  )
+  
+  for (threshold in thresholds) {
+    filtered_adjMat <- adjMat * (adjMat >= threshold)
+      
+    network <- graph_from_adjacency_matrix(filtered_adjMat, mode = "undirected", weighted = TRUE)
+      
+    network_properties <- calculate_network_properties_expanded(network)
+      
+    results <- add_row(
+      results,
+      threshold = threshold,
+      mean_distance = network_properties$mean_distance,
+      degrees = network_properties$degrees,
+      clustering_coefficient = network_properties$clustering_coefficient,
+      betweenness_centrality = network_properties$betweenness_centrality,
+      graph_density = network_properties$graph_density
+    )
+  }
+  
+  return(results)
+}
+
+# function for calculating further network properties 
+calculate_network_properties_expanded <- function(network) {
+  
+  mean_dist <- mean_distance(network, directed = FALSE, unconnected = TRUE)
+  degrees <- mean(degree(network)) 
+  
+  clustering_coefficient <- transitivity(network, type = "global")
+  
+  betweenness_centrality <- mean(betweenness(network, directed = FALSE))
+  
+  graph_density <- edge_density(network)
+  
+  return(list(
+    mean_distance = mean_dist,
+    degrees = degrees,
+    clustering_coefficient = clustering_coefficient,
+    betweenness_centrality = betweenness_centrality,
+    graph_density = graph_density
+  ))
+}
+```
+
+```{r code for all condition networks all network properties}
+
+all_results_entire_network_all_properties <- list()
+
+
+analysis_df_all <- analysis_df %>%
+  select(-sample_id, -condition)  
+
+adjMat_all <- adjacency(analysis_df_all, 
+                        selectCols = NULL,  
+                        type = "unsigned", 
+                        power = 14,
+                        corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                        weights = NULL)
+
+
+results_all <- analyse_conditions_expanded(adjMat_all, thresholds)
+
+all_results_entire_network_all_properties[["all_conditions"]] <- results_all
+
+library(dplyr)
+
+# combine into single dataframe
+combined_results <- bind_rows(all_results_entire_network_all_properties, .id = "condition")
+
+print(combined_results)
+
+```
+```{r plot of mean distance and betweenness centrality for all conditions network}
+
+results_all_conditions_entire_network_all_properties <- all_results_entire_network_all_properties[["all_conditions"]]
+
+mean_distances_all_conditions <- results_all_conditions_entire_network_all_properties$mean_distance
+betweenness_centralities_all_conditions <- results_all_conditions_entire_network_all_properties$betweenness_centrality
+
+par(mar = c(5, 4, 4, 6) + 0.1)  
+
+# mean distance plot and y axis
+plot(thresholds, mean_distances_all_conditions, type = "b", col = "blue", 
+     ylim = c(min(mean_distances_all_conditions), max(mean_distances_all_conditions)),
+     xlab = "Threshold", ylab = "Mean Distance")
+
+# betweenness centrality on the same plot  right hand side y axis
+par(new = TRUE)  # Overlay the new plot
+plot(thresholds, betweenness_centralities_all_conditions, type = "b", col = "red", 
+     ylim = c(min(betweenness_centralities_all_conditions), max(betweenness_centralities_all_conditions)), 
+     axes = FALSE, xlab = "", ylab = "")  # No axes or labels for the second plot
+
+# right hand side y axis
+axis(4) 
+mtext("Betweenness Centrality", side = 4, line = 4) 
+
+legend("topright", legend = c("Mean Distance", "Betweenness Centrality"),
+       col = c("blue", "red"), lty = 1)
+```
+```{r code for all network properties against decreasing thresholds and removing one condition each loop (total conditions always total-1}
+
+
+for (condition_to_remove in all_conditions) {
+  print(condition_to_remove)
+  
+  analysis_df_filtered <- analysis_df %>%
+    filter(!str_detect(condition, condition_to_remove)) %>%
+    select(-sample_id, -condition)
+  
+  adjMat_filtered <- adjacency(analysis_df_filtered, 
+                               selectCols = NULL, 
+                               type = "unsigned", 
+                               power = 14,
+                               corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                               weights = NULL
+  )
+  
+  results_filtered <- analyse_conditions_expanded(adjMat_filtered, thresholds)
+  
+  all_results_entire_network_all_properties[[condition_to_remove]] <- results_filtered
+}
+  
+```
+
+```{r plot for exporting each condition removed mean distance and betweenness centrality vs threshold on 4x4 grid of plots}
+
+png("plots_4x4_grid_mean_distance_betweenness.png", width = 1400, height = 1400)
+
+par(mfrow = c(4, 4))
+
+par(mar = c(5, 5, 4, 5)) 
+
+cex_main_size <- 2.5  
+cex_lab_size <- 2.5   
+cex_axis_size <- 2  
+
+# for consistent y axis across plots
+all_mean_distances <- unlist(lapply(all_results_entire_network_all_properties, function(x) x$mean_distance))
+all_betweenness_centralities <- unlist(lapply(all_results_entire_network_all_properties, function(x) x$betweenness_centrality))
+
+y_range_mean_dist <- range(all_mean_distances, na.rm = TRUE)
+y_range_betweenness <- range(all_betweenness_centralities, na.rm = TRUE)
+
+# all conditions plot
+plot(thresholds, mean_distances_all, type = "b", col = "blue", 
+     ylim = y_range_mean_dist, xlab = "Threshold", ylab = "Mean Distance",
+     main = "All Conditions", cex.main = cex_main_size, cex.lab = cex_lab_size, cex.axis = cex_axis_size)
+
+par(new = TRUE)
+plot(thresholds, betweenness_centralities_all, type = "b", col = "red", 
+     ylim = y_range_betweenness, axes = FALSE, xlab = "", ylab = "")
+
+axis(4, cex.axis = cex_axis_size)
+mtext("Betweenness Centrality", side = 4, line = 3, cex = 1.5)
+
+# loop through other conditions
+for (i in seq_along(all_conditions)) {
+  condition_name <- all_conditions[i]
+  
+  mean_distances <- all_results_entire_network_all_properties[[condition_name]]$mean_distance
+  betweenness_centralities <- all_results_entire_network_all_properties[[condition_name]]$betweenness_centrality
+  
+  plot(thresholds, mean_distances, type = "b", col = "blue", 
+       ylim = y_range_mean_dist, xlab = "Threshold", ylab = "Mean Distance", 
+       main = condition_name, cex.main = cex_main_size, cex.lab = cex_lab_size, cex.axis = cex_axis_size)
+  
+  par(new = TRUE)
+  plot(thresholds, betweenness_centralities, type = "b", col = "red", 
+       ylim = y_range_betweenness, axes = FALSE, xlab = "", ylab = "")
+  
+  axis(4, cex.axis = cex_axis_size)
+  mtext("Betweenness Centrality", side = 4, line = 3, cex = 1.5)
+}
+
+```
+
+
+```{r set number of decreasing conditions calculate all properties}
+
+all_conditions_rev <- rev(c("ammonium", "histidine", "lysine", "hypoxia", "extended hypoxia",
+                    "reaerated culture", "butyrate", "butyrate and glucose",
+                    "glucose", "high iron", "low iron", "acid", "stationary", "cholesterol", "exponential"))
+
+all_results_selected_conditions_all_properties <- list()
+
+condition_counts <- c(15, 10, 5, 1)
+
+for (num_conditions in condition_counts) {
+  
+  if (num_conditions == 1) {
+    conditions_to_use <- "exponential"
+  } else {
+    conditions_to_use <- all_conditions_rev[1:num_conditions]
+  }
+  
+  print(paste("Using conditions:", paste(conditions_to_use, collapse = ", ")))
+  
+  analysis_df_filtered <- analysis_df %>%
+    filter(str_detect(condition, paste(conditions_to_use, collapse = "|"))) %>%  
+    select(-sample_id, -condition)  
+  
+  adjMat_filtered <- adjacency(analysis_df_filtered, 
+                               selectCols = NULL, 
+                               type = "unsigned", 
+                               power = 14,
+                               corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                               weights = NULL)
+  
+  results_filtered <- analyse_conditions_expanded(adjMat_filtered, thresholds)
+  
+  all_results_selected_conditions_all_properties[[paste(num_conditions, "conditions")]] <- results_filtered
+}
+
+```
+
+```{r number of decreasing conditions calculate all properties}
+all_conditions_rev <- rev(c("ammonium", "histidine", "lysine", "hypoxia", "extended hypoxia",
+                    "reaerated culture", "butyrate", "butyrate and glucose",
+                    "glucose", "high iron", "low iron", "acid", "stationary", "cholesterol", "exponential"))
+
+all_results_selected_conditions_all_properties <- list()
+
+condition_counts <- c(15, 10, 5, 2)
+
+for (num_conditions in condition_counts) {
+  
+  conditions_to_use <- all_conditions_rev[1:num_conditions]
+  
+  print(paste("Using conditions:", paste(conditions_to_use, collapse = ", ")))
+  
+  analysis_df_filtered <- analysis_df %>%
+    filter(str_detect(condition, paste(conditions_to_use, collapse = "|"))) %>%  
+    select(-sample_id, -condition)  
+  
+  adjMat_filtered <- adjacency(analysis_df_filtered, 
+                               selectCols = NULL, 
+                               type = "unsigned", 
+                               power = 14,
+                               corFnc = "bicor", corOptions = "maxPOutliers=0.05",
+                               weights = NULL)
+  
+  results_filtered <- analyse_conditions_expanded(adjMat_filtered, thresholds)
+  
+  all_results_selected_conditions_all_properties[[paste(num_conditions, "conditions")]] <- results_filtered
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
